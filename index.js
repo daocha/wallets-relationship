@@ -38,7 +38,7 @@ async function fetchSolanaTransfers(address, socket) {
     const maxPages = 10; // Scan up to 500 transactions total
 
     // --- Testing Purpose, exclude Transaction ID ---
-    const excludeTx = "******";
+    const excludeTx = "*****";
 
     for (let page = 1; page <= maxPages; page++) {
         socket.emit('progress', { message: `Scanning ${shorten(address)} (Page ${page})...`, transient: true });
@@ -115,46 +115,46 @@ async function getCachedTransfers(address, chain, socket) {
 io.on('connection', (socket) => {
     socket.on('check-relationship', async ({ addrA, addrB, maxHops }) => {
         try {
-            const infoA = identifyWallet(addrA);
+            const wA = identifyWallet(addrA);
+            const wB = identifyWallet(addrB);
             const hops = parseInt(maxHops) || 2;
             const spamNotes = [];
 
-            // Case sensitivity logic
-            const startA = infoA.chain === 'SOL' ? addrA : addrA.toLowerCase();
-            const startB = infoA.chain === 'SOL' ? addrB : addrB.toLowerCase();
-
-            let visitedA = new Map([[startA, { parent: null, tx: null, role: null }]]);
-            let visitedB = new Map([[startB, { parent: null, tx: null, role: null }]]);
-            let queueA = [startA];
-            let queueB = [startB];
+            let visitedA = new Map([[addrA, { parent: null, tx: null, role: null }]]);
+            let visitedB = new Map([[addrB, { parent: null, tx: null, role: null }]]);
+            let queueA = [addrA];
+            let queueB = [addrB];
             let meetingPoint = null;
 
-            socket.emit('progress', { message: `Investigating... Max Hops: ${hops}`, transient: false });
+            socket.emit('progress', { message: `Tracing path (Max Depth: ${hops} Hops)...`, transient: false });
 
+            // The loop runs for the number of hops.
+            // In a bidirectional search, we alternate sides.
             for (let step = 1; step <= hops; step++) {
                 let currentSide = (step % 2 !== 0) ? 'A' : 'B';
                 let currentQueue = (currentSide === 'A') ? queueA : queueB;
                 let myVisited = (currentSide === 'A') ? visitedA : visitedB;
                 let otherVisited = (currentSide === 'A') ? visitedB : visitedA;
+
                 let nextQueue = [];
 
                 for (let curr of currentQueue) {
-                    const neighbors = await getCachedTransfers(curr, infoA.chain, socket);
+                    const neighbors = await getCachedTransfers(curr, wA.chain, socket);
                     for (let [neighbor, info] of neighbors) {
-                        const neighborKey = infoA.chain === 'SOL' ? neighbor : neighbor.toLowerCase();
+                        if (!myVisited.has(neighbor)) {
+                            myVisited.set(neighbor, { parent: curr, tx: info.tx, role: info.role });
+                            nextQueue.push(neighbor);
 
-                        if (!myVisited.has(neighborKey)) {
-                            myVisited.set(neighborKey, { parent: curr, tx: info.tx, role: info.role });
-                            nextQueue.push(neighborKey);
+                            // Check if frontiers meet
+                            if (otherVisited.has(neighbor)) {
+                                const infoA = (currentSide === 'A') ? myVisited.get(neighbor) : otherVisited.get(neighbor);
+                                const infoB = (currentSide === 'B') ? myVisited.get(neighbor) : otherVisited.get(neighbor);
 
-                            if (otherVisited.has(neighborKey)) {
-                                const dataA = (currentSide === 'A') ? myVisited.get(neighborKey) : otherVisited.get(neighborKey);
-                                const dataB = (currentSide === 'B') ? myVisited.get(neighborKey) : otherVisited.get(neighborKey);
-
-                                if (dataA.role === 'received_from' && dataB.role === 'received_from') {
-                                    spamNotes.push({ address: neighborKey, txA: dataA.tx, txB: dataB.tx });
+                                if (infoA.role === 'received_from' && infoB.role === 'received_from') {
+                                    // SPAM: Both received from this address. Log as note, don't stop search.
+                                    spamNotes.push({ address: neighbor, txA: infoA.tx, txB: infoB.tx });
                                 } else {
-                                    meetingPoint = neighborKey;
+                                    meetingPoint = neighbor;
                                     break;
                                 }
                             }
@@ -162,19 +162,30 @@ io.on('connection', (socket) => {
                     }
                     if (meetingPoint) break;
                 }
+
                 if (currentSide === 'A') queueA = nextQueue; else queueB = nextQueue;
                 if (meetingPoint || (queueA.length === 0 && queueB.length === 0)) break;
             }
 
-            const formatSpam = spamNotes.map(s => ({
-                address: shorten(s.address), urlA: infoA.txBase + s.txA, urlB: infoA.txBase + s.txB
+            const formattedSpam = spamNotes.map(s => ({
+                address: shorten(s.address),
+                urlA: wA.txBase + s.txA,
+                urlB: wA.txBase + s.txB
             }));
 
             if (meetingPoint) {
-                const path = reconstructPath(visitedA, visitedB, meetingPoint, infoA.txBase);
-                socket.emit('conclusion', { status: `Connection Found (${path.length} Hops)`, evidence: path, spamNotes: formatSpam });
+                const fullPath = reconstructPath(visitedA, visitedB, meetingPoint, wA.txBase);
+                socket.emit('conclusion', {
+                    status: `Significant Connection Found (${fullPath.length} Hops)`,
+                    evidence: fullPath,
+                    spamNotes: formattedSpam
+                });
             } else {
-                socket.emit('conclusion', { status: 'No significant relationship found.', evidence: [], spamNotes: formatSpam });
+                socket.emit('conclusion', {
+                    status: 'No significant relationship found.',
+                    evidence: [],
+                    spamNotes: formattedSpam
+                });
             }
         } catch (err) { socket.emit('error', err.message); }
     });
