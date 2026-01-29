@@ -13,46 +13,102 @@ app.use(express.static('public'));
 // --- GLOBAL IN-MEMORY CACHE ---
 const txCache = new Map();
 
+// Add this utility function near the top of your index.js
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
- * Fancy Address Formatter: 0x1234...abcd
+ * Address Formatter: 1234...mid...abcd (First 4, Mid 3, Last 4)
  */
 function shorten(addr) {
-    if (!addr || addr.length < 10) return addr;
-    return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
+    if (!addr || addr.length < 15) return addr;
+    const len = addr.length;
+    const start = addr.slice(0, 4);
+    const end = addr.slice(-4);
+    const midStart = Math.floor(len / 2) - 1;
+    const mid = addr.slice(midStart, midStart + 3);
+    return `${start}...${mid}...${end}`;
+}
+
+/**
+ * Fetch Solana transfers with pagination support
+ */
+async function fetchSolanaTransfers(address, socket) {
+    let connections = new Map();
+    let lastSignature = null;
+    const maxPages = 10; // Scan up to 500 transactions total
+
+    // --- Testing Purpose, exclude Transaction ID ---
+    const excludeTx = "*****";
+
+    for (let page = 1; page <= maxPages; page++) {
+        socket.emit('progress', { message: `Scanning ${shorten(address)} (Page ${page})...`, transient: true });
+
+        let url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${process.env.HELIUS_API_KEY}`;
+        if (lastSignature) url += `&before=${lastSignature}`;
+
+        try {
+            const { data } = await axios.get(url);
+
+            // Add a small delay after a successful request to respect rate limits
+            await sleep(300);
+
+            if (!data || data.length === 0) break;
+
+            data.forEach(tx => {
+                if (tx.signature === excludeTx) {
+                    console.log(`[Test] Excluding transaction: ${tx.signature}`);
+                    return; // Temporarily exclude this transaction
+                }
+
+                [...(tx.nativeTransfers || []), ...(tx.tokenTransfers || [])].forEach(t => {
+                    const isSender = t.fromUserAccount === address;
+                    const other = isSender ? t.toUserAccount : t.fromUserAccount;
+                    if (other && other !== address) {
+                        // Maintain original case for Solana
+                        connections.set(other, {
+                            tx: tx.signature,
+                            role: isSender ? 'sent_to' : 'received_from'
+                        });
+                    }
+                });
+                lastSignature = tx.signature;
+            });
+
+            if (data.length < 100) break;
+        } catch (e) {
+            console.error(`Helius API Error: ${e.message}`);
+            break;
+        }
+    }
+    return connections;
 }
 
 async function getCachedTransfers(address, chain, socket) {
     if (txCache.has(address)) return txCache.get(address);
 
-    const connections = new Map();
-    socket.emit('progress', { message: `API Query: Scanning ${shorten(address)}...`, transient: true });
-
-    try {
-        if (chain === 'SOL') {
-            const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${process.env.HELIUS_API_KEY}`;
-            const { data } = await axios.get(url);
-            (data || []).forEach(tx => {
-                [...(tx.nativeTransfers || []), ...(tx.tokenTransfers || [])].forEach(t => {
-                    const isSender = t.fromUserAccount === address;
-                    const other = isSender ? t.toUserAccount : t.fromUserAccount;
-                    if (other && other !== address) {
-                        connections.set(other, { tx: tx.signature, role: isSender ? 'sent_to' : 'received_from' });
+    let connections = new Map();
+    if (chain === 'SOL') {
+        connections = await fetchSolanaTransfers(address, socket);
+    } else if (chain === 'ETH') {
+        const addrLower = address.toLowerCase();
+        for (let page = 1; page <= 2; page++) {
+            const url = `https://api.etherscan.io/api?module=account&action=tokentx&address=${addrLower}&page=${page}&offset=100&sort=desc&apikey=${process.env.ETHERSCAN_API_KEY}`;
+            try {
+                const { data } = await axios.get(url);
+                if (!data.result || data.result.length === 0) break;
+                data.result.forEach(t => {
+                    const isSender = t.from.toLowerCase() === addrLower;
+                    const other = (isSender ? t.to : t.from).toLowerCase();
+                    if (other !== addrLower) {
+                        connections.set(other, { tx: t.hash, role: isSender ? 'sent_to' : 'received_from' });
                     }
                 });
-            });
-        } else if (chain === 'ETH') {
-            const url = `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&page=1&offset=100&sort=desc&apikey=${process.env.ETHERSCAN_API_KEY}`;
-            const { data } = await axios.get(url);
-            (data.result || []).forEach(t => {
-                const isSender = t.from.toLowerCase() === address.toLowerCase();
-                const other = isSender ? t.to : t.from;
-                if (other && other.toLowerCase() !== address.toLowerCase()) {
-                    connections.set(other, { tx: t.hash, role: isSender ? 'sent_to' : 'received_from' });
-                }
-            });
+                if (data.result.length < 100) break;
+            } catch (e) { break; }
         }
-        txCache.set(address, connections);
-    } catch (e) { console.error(`Error: ${e.message}`); }
+    }
+
+    txCache.set(address, connections);
     return connections;
 }
 
@@ -135,29 +191,56 @@ io.on('connection', (socket) => {
     });
 });
 
+/**
+ * Reconstructs the path ensuring output is ALWAYS: Sender -> Receiver
+ */
 function reconstructPath(vA, vB, middle, base) {
     let path = [];
+
+    // Trace back from middle to Source A
     let curr = middle;
-    while (curr && vA.get(curr).parent) {
+    while (curr) {
         const step = vA.get(curr);
-        path.unshift({ pair: `${shorten(step.parent)} → ${shorten(curr)}`, url: base + step.tx });
+        if (!step || !step.parent) break;
+
+        // If A side record says 'sent_to', then parent sent to curr
+        // If A side record says 'received_from', then curr sent to parent
+        const sender = step.role === 'sent_to' ? step.parent : curr;
+        const receiver = step.role === 'sent_to' ? curr : step.parent;
+
+        path.unshift({
+            pair: `${shorten(sender)} → ${shorten(receiver)}`,
+            url: base + step.tx
+        });
         curr = step.parent;
     }
+
+    // Trace from middle to Target B
     curr = middle;
-    while (curr && vB.get(curr).parent) {
+    while (curr) {
         const step = vB.get(curr);
-        path.push({ pair: `${shorten(curr)} → ${shorten(step.parent)}`, url: base + step.tx });
+        if (!step || !step.parent) break;
+
+        // B side logic is mirroring A:
+        // If B's step role is 'sent_to', then parent (closer to B) sent to curr (closer to middle)
+        // We want the arrow to always show Sender -> Receiver.
+        const sender = step.role === 'sent_to' ? step.parent : curr;
+        const receiver = step.role === 'sent_to' ? curr : step.parent;
+
+        path.push({
+            pair: `${shorten(sender)} → ${shorten(receiver)}`,
+            url: base + step.tx
+        });
         curr = step.parent;
     }
     return path;
 }
 
 function identifyWallet(addr) {
-    const chain = WAValidator.validate(addr, 'sol') ? 'SOL' : 'ETH';
+    const isSol = WAValidator.validate(addr, 'sol');
     return {
-        chain,
-        txBase: chain === 'SOL' ? 'https://solscan.io/tx/' : 'https://etherscan.io/tx/',
-        name: chain
+        chain: isSol ? 'SOL' : 'ETH',
+        txBase: isSol ? 'https://solscan.io/tx/' : 'https://etherscan.io/tx/'
     };
 }
 
