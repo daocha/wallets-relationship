@@ -244,4 +244,6 @@ function identifyWallet(addr) {
     };
 }
 
-server.listen(process.env.PORT || 3000, () => console.log('Investigator Active on :3000'));
+let port = process.env.PORT || 3000;
+
+server.listen(port, () => console.log(`Investigator Active on :${port}`));
