@@ -33,6 +33,10 @@ This tool determines whether **two blockchain wallets are meaningfully connected
 
 ---
 
+## Preview
+
+![Screenshot 2026-02-27 at 7 26 02 PM](https://github.com/user-attachments/assets/0820a787-6051-4fc3-81d7-8ac77e387de1)
+
 ## 3️⃣ Environment Setup
 
 Create a `.env` file in the project root directory:
