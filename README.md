@@ -104,3 +104,8 @@ http://localhost:3000
 - Exchange and bridge wallets may appear as intermediaries.
 
 ---
+
+## License
+
+This project is released under the MIT License. Add a `LICENSE` file containing the MIT text when publishing or redistributing it.
+
