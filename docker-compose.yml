@@ -1,8 +1,9 @@
 services:
-  wallets-relationship-dashboard:
+  dashboard:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: wallet-relationship-dashboard
     ports:
       - "3000:3000"
     env_file:
