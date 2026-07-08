@@ -37,7 +37,7 @@ This tool determines whether **two blockchain wallets are meaningfully connected
 
 ![Screenshot 2026-02-27 at 7 26 02 PM](https://github.com/user-attachments/assets/0820a787-6051-4fc3-81d7-8ac77e387de1)
 
-## 3️⃣ Environment Setup
+## 1️⃣ Environment Setup
 
 Create a `.env` file in the project root directory:
 
@@ -49,13 +49,49 @@ PORT=3000
 
 ---
 
-## 4️⃣ Launch
+## 2️⃣ Run Locally
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the app:
 
 ```bash
 npm start
 ```
 
 Then open your browser:
+
+```text
+http://localhost:3000
+```
+
+---
+
+## 3️⃣ Run with Docker
+
+Build and start with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Run in detached mode:
+
+```bash
+docker compose up --build -d
+```
+
+Stop containers:
+
+```bash
+docker compose down
+```
+
+Then open:
 
 ```text
 http://localhost:3000
@@ -108,4 +144,3 @@ http://localhost:3000
 ## License
 
 This project is released under the MIT License. Add a `LICENSE` file containing the MIT text when publishing or redistributing it.
-
